@@ -16502,7 +16502,7 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                 if (b->pc2line_buf) {
                     line_num = find_line_num(ctx, b, pc_index, &col_num);
                 }
-                filename   = b->filename     ? JS_AtomToCString(ctx, b->filename)    : NULL;
+                filename = b->filename  ? JS_AtomToCString(ctx, b->filename)  : NULL;
                 funcname = b->func_name ? JS_AtomToCString(ctx, b->func_name) : NULL;
 
                 int ret = 0;
