@@ -27037,6 +27037,7 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
     case TOK_IF:
         {
             int label1, label2, mask;
+            emit_source_loc(s);
             if (next_token(s))
                 goto fail;
             /* create a new scope for `let f;if(1) function f(){}` */
@@ -27145,6 +27146,7 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
             int tok, bits;
             bool is_async;
 
+            emit_source_loc(s);
             if (next_token(s))
                 goto fail;
 
