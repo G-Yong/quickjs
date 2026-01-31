@@ -506,13 +506,7 @@ struct JSContext {
                              const char *filename, int line, int flags, int scope_idx);
     void *user_opaque;
 
-    int (*operation_changed)(uint8_t op,
-                             const char *filename,
-                             const char *funcname,
-                             int line,
-                             int col,
-                             void *opaque
-                             );
+    JSOPChangedHandler *operation_changed;
     void *oc_opaque;
 };
 
@@ -2481,6 +2475,99 @@ void JS_SetOPChangedHandler(JSContext *ctx, JSOPChangedHandler *cb, void *opaque
 {
     ctx->operation_changed = cb;
     ctx->oc_opaque = opaque;
+}
+
+/* Debug API: Get stack frame at specific level */
+static JSStackFrame *js_get_stack_frame_at_level(JSContext *ctx, int level)
+{
+    JSRuntime *rt = ctx->rt;
+    JSStackFrame *sf = rt->current_stack_frame;
+    int current_level = 0;
+    
+    while (sf != NULL && current_level < level) {
+        sf = sf->prev_frame;
+        current_level++;
+    }
+    return sf;
+}
+
+/* Get the call stack depth */
+int JS_GetStackDepth(JSContext *ctx)
+{
+    JSRuntime *rt = ctx->rt;
+    JSStackFrame *sf = rt->current_stack_frame;
+    int depth = 0;
+    
+    while (sf != NULL) {
+        depth++;
+        sf = sf->prev_frame;
+    }
+    return depth;
+}
+
+/* Get local variables at a specific stack level */
+JSLocalVar *JS_GetLocalVariablesAtLevel(JSContext *ctx, int level, int *pcount)
+{
+    if (pcount)
+        *pcount = 0;
+    
+    JSStackFrame *sf = js_get_stack_frame_at_level(ctx, level);
+    if (sf == NULL)
+        return NULL;
+    
+    JSValue func = sf->cur_func;
+    if (JS_VALUE_GET_TAG(func) != JS_TAG_OBJECT)
+        return NULL;
+    
+    JSObject *p = JS_VALUE_GET_OBJ(func);
+    if (p->class_id != JS_CLASS_BYTECODE_FUNCTION)
+        return NULL;
+    
+    JSFunctionBytecode *b = p->u.func.function_bytecode;
+    int total_vars = b->arg_count + b->var_count;
+    
+    if (total_vars == 0)
+        return NULL;
+    
+    JSLocalVar *vars = js_malloc(ctx, sizeof(JSLocalVar) * total_vars);
+    if (!vars)
+        return NULL;
+    
+    int idx = 0;
+    
+    /* First, get arguments */
+    for (int i = 0; i < b->arg_count; i++, idx++) {
+        JSVarDef *vd = &b->vardefs[i];
+        vars[idx].name = JS_AtomToCString(ctx, vd->var_name);
+        vars[idx].value = js_dup(sf->arg_buf[i]);
+        vars[idx].is_arg = 1;
+        vars[idx].scope_level = vd->scope_level;
+    }
+    
+    /* Then, get local variables */
+    for (int i = 0; i < b->var_count; i++, idx++) {
+        JSVarDef *vd = &b->vardefs[b->arg_count + i];
+        vars[idx].name = JS_AtomToCString(ctx, vd->var_name);
+        vars[idx].value = js_dup(sf->var_buf[i]);
+        vars[idx].is_arg = 0;
+        vars[idx].scope_level = vd->scope_level;
+    }
+    
+    if (pcount)
+        *pcount = total_vars;
+    return vars;
+}
+
+/* Free local variables array */
+void JS_FreeLocalVariables(JSContext *ctx, JSLocalVar *vars, int count)
+{
+    if (!vars)
+        return;
+    for (int i = 0; i < count; i++) {
+        JS_FreeCString(ctx, vars[i].name);
+        JS_FreeValue(ctx, vars[i].value);
+    }
+    js_free(ctx, vars);
 }
 
 typedef enum JSFreeModuleEnum {
@@ -16709,7 +16796,7 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                 funcname = b->func_name ? JS_AtomToCString(ctx, b->func_name) : NULL;
 
                 int ret = 0;
-                ret = ctx->operation_changed(*pc, filename, funcname, line_num, col_num, ctx->oc_opaque);
+                ret = ctx->operation_changed(ctx, *pc, filename, funcname, line_num, col_num, ctx->oc_opaque);
                 if (filename) {
                     // fprintf(stderr, "op:%d %d at %s %s:%d:%d\n", *pc, OP_return, funcname, filename, line_num, col_num);
                     JS_FreeCString(ctx, filename);

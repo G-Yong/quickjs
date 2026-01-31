@@ -470,13 +470,34 @@ JS_EXTERN void JS_SetClassProto(JSContext *ctx, JSClassID class_id, JSValue obj)
 JS_EXTERN JSValue JS_GetClassProto(JSContext *ctx, JSClassID class_id);
 JS_EXTERN JSValue JS_GetFunctionProto(JSContext *ctx);
 
-typedef int JSOPChangedHandler(uint8_t op,
+/* Debug callback - called for each bytecode operation during execution */
+typedef int JSOPChangedHandler(JSContext *ctx,
+                               uint8_t op,
                                const char *filename,
                                const char *funcname,
                                int line,
                                int col,
                                void *opaque);
 JS_EXTERN void JS_SetOPChangedHandler(JSContext *ctx, JSOPChangedHandler *cb, void *opaque);
+
+/* Debug API: Get local variables in stack frames */
+typedef struct JSLocalVar {
+    const char *name;      /* variable name (must be freed with JS_FreeCString) */
+    JSValue value;         /* variable value (must be freed with JS_FreeValue) */
+    int is_arg;            /* 1 if argument, 0 if local variable */
+    int scope_level;       /* scope level of the variable */
+} JSLocalVar;
+
+/* Get the call stack depth */
+JS_EXTERN int JS_GetStackDepth(JSContext *ctx);
+
+/* Get local variables at a specific stack level (0 = current frame, 1 = caller, etc.)
+   *pcount: output, number of variables returned
+   Returns allocated array of JSLocalVar (must be freed with JS_FreeLocalVariables), or NULL on error */
+JS_EXTERN JSLocalVar *JS_GetLocalVariablesAtLevel(JSContext *ctx, int level, int *pcount);
+
+/* Free local variables array returned by JS_GetLocalVariablesAtLevel */
+JS_EXTERN void JS_FreeLocalVariables(JSContext *ctx, JSLocalVar *vars, int count);
 
 /* the following functions are used to select the intrinsic object to
    save memory */
