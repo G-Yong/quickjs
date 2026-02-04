@@ -28195,6 +28195,7 @@ static __exception int js_parse_statement_or_decl(JSParseState *s,
             goto fail;
         break;
     case TOK_RETURN:
+        emit_source_loc(s);
         if (s->cur_func->is_eval) {
             js_parse_error(s, "return not in a function");
             goto fail;
