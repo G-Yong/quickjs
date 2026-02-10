@@ -36,7 +36,6 @@ extern "C" {
 #endif
 
 #if defined(_MSC_VER)
-#include <winsock2.h>
 #include <malloc.h>
 #define alloca _alloca
 #define ssize_t ptrdiff_t
@@ -48,6 +47,7 @@ extern "C" {
 #elif defined(__FreeBSD__)
 #include <malloc_np.h>
 #elif defined(_WIN32)
+#include <winsock2.h>
 #include <windows.h>
 #endif
 #if !defined(_WIN32) && !defined(EMSCRIPTEN) && !defined(__wasi__) && !defined(__DJGPP)
@@ -66,7 +66,6 @@ extern "C" {
 #if defined(_MSC_VER) && !defined(__clang__)
 #  define likely(x)       (x)
 #  define unlikely(x)     (x)
-#  define force_inline __forceinline
 #  define no_inline __declspec(noinline)
 #  define __maybe_unused
 #  define __attribute__(x)
@@ -74,7 +73,6 @@ extern "C" {
 #else
 #  define likely(x)       __builtin_expect(!!(x), 1)
 #  define unlikely(x)     __builtin_expect(!!(x), 0)
-#  define force_inline inline __attribute__((always_inline))
 #  define no_inline __attribute__((noinline))
 #  define __maybe_unused __attribute__((unused))
 #endif
