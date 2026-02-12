@@ -605,9 +605,10 @@ typedef enum {
 typedef enum {
     JS_STRING_KIND_NORMAL,
     JS_STRING_KIND_SLICE,
+    JS_STRING_KIND_INDIRECT,
 } JSStringKind;
 
-#define JS_ATOM_HASH_MASK  ((1 << 29) - 1)
+#define JS_ATOM_HASH_MASK  ((1 << 28) - 1)
 
 struct JSString {
     JSRefCountHeader header; /* must come first, 32-bit */
@@ -616,8 +617,8 @@ struct JSString {
     /* for JS_ATOM_TYPE_SYMBOL: hash = 0, atom_type = 3,
        for JS_ATOM_TYPE_PRIVATE: hash = 1, atom_type = 3
        XXX: could change encoding to have one more bit in hash */
-    uint32_t hash : 29;
-    uint32_t kind : 1;
+    uint32_t hash : 28;
+    uint32_t kind : 2;
     uint32_t atom_type : 2; /* != 0 if atom, JS_ATOM_TYPE_x */
     uint32_t hash_next; /* atom_index for JS_ATOM_TYPE_SYMBOL */
     JSWeakRefRecord *first_weak_ref;
@@ -643,6 +644,7 @@ struct JSStringRope {
 static inline void *strv(JSString *p)
 {
     JSStringSlice *slice;
+    void **indirect;
 
     switch (p->kind) {
     case JS_STRING_KIND_NORMAL:
@@ -650,6 +652,9 @@ static inline void *strv(JSString *p)
     case JS_STRING_KIND_SLICE:
         slice = (void *)&p[1];
         return (char *)&slice->parent[1] + slice->start;
+    case JS_STRING_KIND_INDIRECT:
+        indirect = (void *)&p[1];
+        return *indirect;
     }
     abort();
     return NULL;
@@ -2209,15 +2214,22 @@ static inline void js_free_string(JSRuntime *rt, JSString *str)
 
 static inline void js_free_string0(JSRuntime *rt, JSString *str)
 {
+    JSStringSlice *slice;
+
     if (str->atom_type) {
         JS_FreeAtomStruct(rt, str);
     } else {
 #ifdef ENABLE_DUMPS // JS_DUMP_LEAKS
         list_del(&str->link);
 #endif
-        if (str->kind == JS_STRING_KIND_SLICE) {
-            JSStringSlice *slice = (void *)&str[1];
+        switch (str->kind) {
+        case JS_STRING_KIND_SLICE:
+            slice = (void *)&str[1];
             js_free_string(rt, slice->parent); // safe, recurses only 1 level
+            break;
+        case JS_STRING_KIND_INDIRECT:
+            js_free_rt(rt, strv(str));
+            break;
         }
         js_free_rt(rt, str);
     }
@@ -29224,9 +29236,9 @@ static char *js_default_module_normalize_name(JSContext *ctx,
         return js_strdup(ctx, name);
     }
 
-    p = strrchr(base_name, '/');
-    if (p)
-        len = p - base_name;
+    r = strrchr(base_name, '/');
+    if (r)
+        len = r - base_name;
     else
         len = 0;
 
@@ -47075,8 +47087,15 @@ static JSValue js_compile_regexp(JSContext *ctx, JSValueConst pattern,
         return JS_EXCEPTION;
     }
 
-    ret = js_new_string8_len(ctx, (char *)re_bytecode_buf, re_bytecode_len);
-    js_free(ctx, re_bytecode_buf);
+    ret = js_new_string8_len(ctx, (void *)&re_bytecode_buf,
+                             sizeof(re_bytecode_buf));
+    if (JS_IsException(ret)) {
+        js_free(ctx, re_bytecode_buf);
+    } else {
+        JSString *p = JS_VALUE_GET_STRING(ret);
+        p->kind = JS_STRING_KIND_INDIRECT;
+        p->len = re_bytecode_len;
+    }
     return ret;
 }
 
