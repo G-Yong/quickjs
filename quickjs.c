@@ -1,10 +1,10 @@
 /*
  * QuickJS Javascript Engine
  *
- * Copyright (c) 2017-2025 Fabrice Bellard
+ * Copyright (c) 2017-2026 Fabrice Bellard
  * Copyright (c) 2017-2025 Charlie Gordon
- * Copyright (c) 2023-2025 Ben Noordhuis
- * Copyright (c) 2023-2025 Saúl Ibarra Corretgé
+ * Copyright (c) 2023-2026 Ben Noordhuis
+ * Copyright (c) 2023-2026 Saúl Ibarra Corretgé
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -321,7 +321,11 @@ struct JSRuntime {
 
     struct list_head job_list; /* list of JSJobEntry.link */
 
-    JSModuleNormalizeFunc *module_normalize_func;
+    bool module_normalize_has_attr;
+    union {
+        JSModuleNormalizeFunc *module_normalize_func;
+        JSModuleNormalizeFunc2 *module_normalize_func2;
+    } normalize_u;
     bool module_loader_has_attr;
     union {
         JSModuleLoaderFunc *module_loader_func;
@@ -21080,9 +21084,8 @@ static JSValue js_async_generator_resolve_function(JSContext *ctx,
         } else {
             js_async_generator_resolve(ctx, s, arg, true);
         }
-    } else {
+    } else if (s->state == JS_ASYNC_GENERATOR_STATE_EXECUTING) {
         /* restart function execution after await() */
-        assert(s->state == JS_ASYNC_GENERATOR_STATE_EXECUTING);
         s->func_state.throw_flag = is_reject;
         if (is_reject) {
             JS_Throw(ctx, js_dup(arg));
@@ -29190,7 +29193,8 @@ void JS_SetModuleLoaderFunc(JSRuntime *rt,
                             JSModuleNormalizeFunc *module_normalize,
                             JSModuleLoaderFunc *module_loader, void *opaque)
 {
-    rt->module_normalize_func = module_normalize;
+    rt->module_normalize_has_attr = false;
+    rt->normalize_u.module_normalize_func = module_normalize;
     rt->module_loader_has_attr = false;
     rt->u.module_loader_func = module_loader;
     rt->module_check_attrs = NULL;
@@ -29203,11 +29207,19 @@ void JS_SetModuleLoaderFunc2(JSRuntime *rt,
                              JSModuleCheckSupportedImportAttributes *module_check_attrs,
                              void *opaque)
 {
-    rt->module_normalize_func = module_normalize;
+    rt->module_normalize_has_attr = false;
+    rt->normalize_u.module_normalize_func = module_normalize;
     rt->module_loader_has_attr = true;
     rt->u.module_loader_func2 = module_loader;
     rt->module_check_attrs = module_check_attrs;
     rt->module_loader_opaque = opaque;
+}
+
+void JS_SetModuleNormalizeFunc2(JSRuntime *rt,
+                                JSModuleNormalizeFunc2 *module_normalize)
+{
+    rt->module_normalize_has_attr = true;
+    rt->normalize_u.module_normalize_func2 = module_normalize;
 }
 
 int JS_SetModulePrivateValue(JSContext *ctx, JSModuleDef *m, JSValue val)
@@ -29307,11 +29319,15 @@ static JSModuleDef *js_host_resolve_imported_module(JSContext *ctx,
     char *cname;
     JSAtom module_name;
 
-    if (!rt->module_normalize_func) {
+    if (!rt->normalize_u.module_normalize_func && !rt->normalize_u.module_normalize_func2) {
         cname = js_default_module_normalize_name(ctx, base_cname, cname1);
+    } else if (rt->module_normalize_has_attr) {
+        cname = rt->normalize_u.module_normalize_func2(ctx, base_cname, cname1,
+                                                       attributes,
+                                                       rt->module_loader_opaque);
     } else {
-        cname = rt->module_normalize_func(ctx, base_cname, cname1,
-                                          rt->module_loader_opaque);
+        cname = rt->normalize_u.module_normalize_func(ctx, base_cname, cname1,
+                                                      rt->module_loader_opaque);
     }
     if (!cname)
         return NULL;
@@ -55887,6 +55903,23 @@ void JS_DetachArrayBuffer(JSContext *ctx, JSValueConst obj)
     }
 }
 
+int JS_IsImmutableArrayBuffer(JSValueConst obj)
+{
+    JSArrayBuffer *abuf = JS_GetOpaque(obj, JS_CLASS_ARRAY_BUFFER);
+    if (!abuf)
+        return -1;
+    return abuf->immutable;
+}
+
+int JS_SetImmutableArrayBuffer(JSValueConst obj, bool immutable)
+{
+    JSArrayBuffer *abuf = JS_GetOpaque(obj, JS_CLASS_ARRAY_BUFFER);
+    if (!abuf)
+        return -1;
+    abuf->immutable = immutable;
+    return 0;
+}
+
 /* get an ArrayBuffer or SharedArrayBuffer */
 static JSArrayBuffer *js_get_array_buffer(JSContext *ctx, JSValueConst obj)
 {
@@ -59406,10 +59439,11 @@ static const JSClassShortDef js_weakref_class_def[] = {
 
 typedef struct JSFinRecEntry {
     struct list_head link;
-    JSValueConst obj;
     JSValueConst target;
     JSValue held_val;
     JSValue token;
+    JSValue cb;
+    JSContext *ctx;
 } JSFinRecEntry;
 
 typedef struct JSFinalizationRegistryData {
@@ -59434,6 +59468,15 @@ static void delete_finrec_weakref(JSRuntime *rt, JSFinRecEntry *fre)
     js_free_rt(rt, wr);
 }
 
+static void js_finrec_free(JSRuntime *rt, JSFinRecEntry *fre)
+{
+    JS_FreeValueRT(rt, fre->held_val);
+    JS_FreeValueRT(rt, fre->token);
+    JS_FreeValueRT(rt, fre->cb);
+    JS_FreeContext(fre->ctx);
+    js_free_rt(rt, fre);
+}
+
 static void js_finrec_finalizer(JSRuntime *rt, JSValueConst val)
 {
     JSFinalizationRegistryData *frd = JS_GetOpaque(val, JS_CLASS_FINALIZATION_REGISTRY);
@@ -59449,9 +59492,7 @@ static void js_finrec_finalizer(JSRuntime *rt, JSValueConst val)
         list_for_each_safe(el, el1, &frd->entries) {
             JSFinRecEntry *fre = list_entry(el, JSFinRecEntry, link);
             list_del(&fre->link);
-            JS_FreeValueRT(rt, fre->held_val);
-            JS_FreeValueRT(rt, fre->token);
-            js_free_rt(rt, fre);
+            js_finrec_free(rt, fre);
         }
         JS_FreeValueRT(rt, frd->cb);
         js_free_rt(rt, frd);
@@ -59469,6 +59510,8 @@ static void js_finrec_mark(JSRuntime *rt, JSValueConst val,
             JSFinRecEntry *fre = list_entry(el, JSFinRecEntry, link);
             JS_MarkValue(rt, fre->held_val, mark_func);
             JS_MarkValue(rt, fre->token, mark_func);
+            JS_MarkValue(rt, fre->cb, mark_func);
+            mark_func(rt, &fre->ctx->header);
         }
     }
 }
@@ -59525,7 +59568,8 @@ static JSValue js_finrec_register(JSContext *ctx, JSValueConst this_val,
         js_free(ctx, fre);
         return JS_EXCEPTION;
     }
-    fre->obj = this_val;
+    fre->cb = js_dup(frd->cb);
+    fre->ctx = JS_DupContext(frd->ctx);
     fre->target = target;
     fre->held_val = js_dup(held_val);
     fre->token = js_dup(token);
@@ -59554,9 +59598,7 @@ static JSValue js_finrec_unregister(JSContext *ctx, JSValueConst this_val, int a
         if (js_same_value(ctx, fre->token, token)) {
             list_del(&fre->link);
             delete_finrec_weakref(ctx->rt, fre);
-            JS_FreeValue(ctx, fre->held_val);
-            JS_FreeValue(ctx, fre->token);
-            js_free(ctx, fre);
+            js_finrec_free(ctx->rt, fre);
             removed = true;
         }
     }
@@ -59657,20 +59699,16 @@ static void reset_weak_ref(JSRuntime *rt, JSWeakRefRecord **first_weak_ref)
             break;
         case JS_WEAK_REF_KIND_FINALIZATION_REGISTRY_ENTRY: {
             fre = wr->u.fin_rec_entry;
-            JSFinalizationRegistryData *frd = JS_GetOpaque(fre->obj, JS_CLASS_FINALIZATION_REGISTRY);
-            assert(frd != NULL);
             /**
              * During the GC sweep phase the held object might be collected first.
              */
             if (!rt->in_free && (!JS_IsObject(fre->held_val) || JS_IsLiveObject(rt, fre->held_val))) {
                 JSValueConst args[2];
-                args[0] = frd->cb;
+                args[0] = fre->cb;
                 args[1] = fre->held_val;
-                JS_EnqueueJob(frd->ctx, js_finrec_job, 2, args);
+                JS_EnqueueJob(fre->ctx, js_finrec_job, 2, args);
             }
-            JS_FreeValueRT(rt, fre->held_val);
-            JS_FreeValueRT(rt, fre->token);
-            js_free_rt(rt, fre);
+            js_finrec_free(rt, fre);
             break;
         }
         default:

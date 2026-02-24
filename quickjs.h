@@ -1,10 +1,10 @@
 /*
  * QuickJS Javascript Engine
  *
- * Copyright (c) 2017-2024 Fabrice Bellard
+ * Copyright (c) 2017-2026 Fabrice Bellard
  * Copyright (c) 2017-2024 Charlie Gordon
- * Copyright (c) 2023-2025 Ben Noordhuis
- * Copyright (c) 2023-2025 Saúl Ibarra Corretgé
+ * Copyright (c) 2023-2026 Ben Noordhuis
+ * Copyright (c) 2023-2026 Saúl Ibarra Corretgé
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -1090,6 +1090,10 @@ JS_EXTERN JSValue JS_NewArrayBufferCopy(JSContext *ctx, const uint8_t *buf, size
 JS_EXTERN void JS_DetachArrayBuffer(JSContext *ctx, JSValueConst obj);
 JS_EXTERN uint8_t *JS_GetArrayBuffer(JSContext *ctx, size_t *psize, JSValueConst obj);
 JS_EXTERN bool JS_IsArrayBuffer(JSValueConst obj);
+// returns true or false if obj is an ArrayBuffer, -1 otherwise
+JS_EXTERN int JS_IsImmutableArrayBuffer(JSValueConst obj);
+// returns 0 if obj is an ArrayBuffer, -1 otherwise
+JS_EXTERN int JS_SetImmutableArrayBuffer(JSValueConst obj, bool immutable);
 JS_EXTERN uint8_t *JS_GetUint8Array(JSContext *ctx, size_t *psize, JSValueConst obj);
 
 typedef enum JSTypedArrayEnum {
@@ -1181,6 +1185,11 @@ typedef struct JSModuleDef JSModuleDef;
 typedef char *JSModuleNormalizeFunc(JSContext *ctx,
                                     const char *module_base_name,
                                     const char *module_name, void *opaque);
+typedef char *JSModuleNormalizeFunc2(JSContext *ctx,
+                                     const char *module_base_name,
+                                     const char *module_name,
+                                     JSValueConst attributes,
+                                     void *opaque);
 typedef JSModuleDef *JSModuleLoaderFunc(JSContext *ctx,
                                         const char *module_name, void *opaque);
 
@@ -1205,6 +1214,10 @@ JS_EXTERN void JS_SetModuleLoaderFunc2(JSRuntime *rt,
                                        JSModuleLoaderFunc2 *module_loader,
                                        JSModuleCheckSupportedImportAttributes *module_check_attrs,
                                        void *opaque);
+
+/* Set an attributes-aware module normalizer. Call after JS_SetModuleLoaderFunc2. */
+JS_EXTERN void JS_SetModuleNormalizeFunc2(JSRuntime *rt,
+                                          JSModuleNormalizeFunc2 *module_normalize);
 
 /* return the import.meta object of a module */
 JS_EXTERN JSValue JS_GetImportMeta(JSContext *ctx, JSModuleDef *m);
@@ -1419,7 +1432,7 @@ JS_EXTERN int JS_SetModuleExportList(JSContext *ctx, JSModuleDef *m,
 
 #define QJS_VERSION_MAJOR 0
 #define QJS_VERSION_MINOR 12
-#define QJS_VERSION_PATCH 0
+#define QJS_VERSION_PATCH 1
 #define QJS_VERSION_SUFFIX ""
 
 JS_EXTERN const char* JS_GetVersion(void);
