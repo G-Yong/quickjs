@@ -1,0 +1,2 @@
+/usr/bin/ar qc libqjs-libc.a "CMakeFiles/qjs-libc.dir/quickjs-libc.c.o"
+/usr/bin/ranlib libqjs-libc.a

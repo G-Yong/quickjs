@@ -1,0 +1,1 @@
+/usr/bin/cc -g -Wl,--dependency-file=CMakeFiles/function_source.dir/link.d CMakeFiles/function_source.dir/gen/function_source.c.o -o function_source  libqjs-libc.a libqjs.a -ldl -lm

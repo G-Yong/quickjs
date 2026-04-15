@@ -1,0 +1,1 @@
+/usr/bin/cc -g -Wl,--dependency-file=CMakeFiles/qjsc.dir/link.d CMakeFiles/qjsc.dir/qjsc.c.o -o qjsc  libqjs-libc.a libqjs.a -ldl -lm
