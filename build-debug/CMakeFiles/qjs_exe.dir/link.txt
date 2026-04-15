@@ -1,1 +1,0 @@
-/usr/bin/cc -g -Wl,--export-dynamic -rdynamic -Wl,--dependency-file=CMakeFiles/qjs_exe.dir/link.d CMakeFiles/qjs_exe.dir/gen/repl.c.o CMakeFiles/qjs_exe.dir/gen/standalone.c.o CMakeFiles/qjs_exe.dir/qjs.c.o -o qjs  libqjs-libc.a libqjs.a -ldl -lm

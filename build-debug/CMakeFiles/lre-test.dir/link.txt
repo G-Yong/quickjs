@@ -1,1 +1,0 @@
-/usr/bin/cc -g -Wl,--dependency-file=CMakeFiles/lre-test.dir/link.d "CMakeFiles/lre-test.dir/lre-test.c.o" "CMakeFiles/lre-test.dir/libregexp.c.o" "CMakeFiles/lre-test.dir/libunicode.c.o" -o lre-test

@@ -1,1 +1,0 @@
-/usr/bin/cc -g -Wl,--dependency-file=CMakeFiles/unicode_gen.dir/link.d CMakeFiles/unicode_gen.dir/libunicode.c.o CMakeFiles/unicode_gen.dir/unicode_gen.c.o -o unicode_gen
