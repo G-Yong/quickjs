@@ -574,26 +574,26 @@ typedef int JSDebugTraceFunc(JSContext *ctx,
 JS_EXTERN void JS_SetDebugTraceHandler(JSContext *ctx,
                                        JSDebugTraceFunc *cb);
 
+/* Run-to-line is a synchronous debugger extension built on OP_debug sites.
+   Resolution selects the first executable line at or after requested_line.
+   During fast-forward, native calls are skipped to avoid external side
+   effects, while bytecode functions still execute so a called nested target
+   can be reached. This API does not suspend arbitrary bytecode PCs, drive
+   asynchronous jobs, or restore a stack that an exception has unwound. */
 typedef struct JSRunToLineResolveResult {
-    int requested_line;
     int resolved_line;
     int exact_match;
-    int in_nested_function;
 } JSRunToLineResolveResult;
 
 JS_EXTERN int JS_ResolveRunToLine(JSContext *ctx, JSValueConst obj,
                                   int requested_line,
                                   JSRunToLineResolveResult *out);
-JS_EXTERN JSValue JS_GetRunToLineFunction(JSContext *ctx, JSValueConst obj,
-                                          int line);
-JS_EXTERN int JS_EnableRunToLine(JSContext *ctx, JSValueConst root_obj,
-                                 JSValueConst target_func_obj,
-                                 int requested_line, int resolved_line);
+/* obj must remain alive until JS_ClearRunToLine because the context stores a
+   non-owning pointer to the selected function bytecode. */
+JS_EXTERN int JS_EnableRunToLine(JSContext *ctx, JSValueConst obj,
+                                 int resolved_line);
 JS_EXTERN bool JS_RunToLineReached(JSContext *ctx, int line);
 JS_EXTERN void JS_ClearRunToLine(JSContext *ctx);
-JS_EXTERN JSValue JS_CallBytecodeFunction(JSContext *ctx,
-                                          JSValueConst bytecode_func,
-                                          int argc, JSValueConst *argv);
 
 /* Debug API: Get local variables in stack frames */
 typedef struct JSDebugLocalVar {
@@ -1095,11 +1095,11 @@ JS_EXTERN JSValue JS_Eval(JSContext *ctx, const char *input, size_t input_len,
                           const char *filename, int eval_flags);
 JS_EXTERN JSValue JS_Eval2(JSContext *ctx, const char *input, size_t input_len,
                            JSEvalOptions *options);
+/* Compile-only wrapper used by run-to-line. It preserves debugger statement
+   boundaries and constant conditional branches only for this compilation. */
 JS_EXTERN JSValue JS_Eval2RunToLineCompile(JSContext *ctx,
                                            const char *input, size_t input_len,
-                                           JSEvalOptions *options,
-                                           int requested_line,
-                                           int resolved_line);
+                                           JSEvalOptions *options);
 JS_EXTERN JSValue JS_EvalThis(JSContext *ctx, JSValueConst this_obj,
                               const char *input, size_t input_len,
                               const char *filename, int eval_flags);
