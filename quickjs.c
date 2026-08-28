@@ -551,6 +551,28 @@ enum {
     JS_BUILTIN_ITERATOR_ZIP_KEYED,
 };
 
+typedef struct JSFunctionBytecode JSFunctionBytecode;
+
+/* All debugger fast-forward state is context-local and valid only while the
+   compiled root value is kept alive by QScriptEngine. target_pc is the exact
+   OP_debug offset used to steer conditional branches in the target function. */
+typedef struct JSRunToLineState {
+    const JSFunctionBytecode *target;
+    int target_pc;
+    int resolved_line;
+    bool fast_forward;
+    bool compile_mode;
+} JSRunToLineState;
+
+static bool js_run_to_line_should_skip_call(struct JSContext *ctx,
+                                            JSValueConst func_obj);
+static bool js_run_to_line_should_mask_call_result(struct JSContext *ctx,
+                                                   JSValueConst func_obj);
+static bool js_run_to_line_should_jump(struct JSContext *ctx,
+                                       JSFunctionBytecode *b,
+                                       int next_pc, int jump_pc,
+                                       bool normal_jump);
+
 /* must be large enough to have a negligible runtime cost and small
    enough to call the interrupt callback often. */
 #define JS_INTERRUPT_COUNTER_INIT 10000
@@ -620,6 +642,7 @@ struct JSContext {
 
     JSDebugTraceFunc *debug_trace;
     void *debug_trace_opaque;
+    JSRunToLineState run_to_line;
 };
 
 typedef union JSFloat64Union {
@@ -18857,17 +18880,35 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
         CASE(OP_call):
         CASE(OP_tail_call):
             {
+                bool mask_result;
                 call_argc = get_u16(pc);
                 pc += 2;
                 goto has_call_argc;
             has_call_argc:
                 call_argv = sp - call_argc;
+                mask_result =
+                    js_run_to_line_should_mask_call_result(ctx, call_argv[-1]);
+                if (unlikely(js_run_to_line_should_skip_call(ctx, call_argv[-1]))) {
+                    for(i = -1; i < call_argc; i++)
+                        JS_FreeValue(ctx, call_argv[i]);
+                    sp -= call_argc + 1;
+                    if (opcode == OP_tail_call) {
+                        ret_val = JS_UNDEFINED;
+                        goto done;
+                    }
+                    *sp++ = JS_UNDEFINED;
+                    BREAK;
+                }
                 sf->cur_pc = pc;
                 ret_val = JS_CallInternal(ctx, call_argv[-1], JS_UNDEFINED,
                                           JS_UNDEFINED, call_argc,
                                           vc(call_argv), 0);
                 if (unlikely(JS_IsException(ret_val)))
                     goto exception;
+                if (unlikely(mask_result && ctx->run_to_line.fast_forward)) {
+                    JS_FreeValue(ctx, ret_val);
+                    ret_val = JS_UNDEFINED;
+                }
                 if (opcode == OP_tail_call)
                     goto done;
                 for(i = -1; i < call_argc; i++)
@@ -18878,15 +18919,29 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
             BREAK;
         CASE(OP_call_constructor):
             {
+                bool mask_result;
                 call_argc = get_u16(pc);
                 pc += 2;
                 call_argv = sp - call_argc;
+                mask_result =
+                    js_run_to_line_should_mask_call_result(ctx, call_argv[-2]);
+                if (unlikely(js_run_to_line_should_skip_call(ctx, call_argv[-2]))) {
+                    for(i = -2; i < call_argc; i++)
+                        JS_FreeValue(ctx, call_argv[i]);
+                    sp -= call_argc + 2;
+                    *sp++ = JS_UNDEFINED;
+                    BREAK;
+                }
                 sf->cur_pc = pc;
                 ret_val = JS_CallConstructorInternal(ctx, call_argv[-2],
                                                      call_argv[-1], call_argc,
                                                      vc(call_argv), 0);
                 if (unlikely(JS_IsException(ret_val)))
                     goto exception;
+                if (unlikely(mask_result && ctx->run_to_line.fast_forward)) {
+                    JS_FreeValue(ctx, ret_val);
+                    ret_val = JS_UNDEFINED;
+                }
                 for(i = -2; i < call_argc; i++)
                     JS_FreeValue(ctx, call_argv[i]);
                 sp -= call_argc + 2;
@@ -18896,15 +18951,33 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
         CASE(OP_call_method):
         CASE(OP_tail_call_method):
             {
+                bool mask_result;
                 call_argc = get_u16(pc);
                 pc += 2;
                 call_argv = sp - call_argc;
+                mask_result =
+                    js_run_to_line_should_mask_call_result(ctx, call_argv[-1]);
+                if (unlikely(js_run_to_line_should_skip_call(ctx, call_argv[-1]))) {
+                    for(i = -2; i < call_argc; i++)
+                        JS_FreeValue(ctx, call_argv[i]);
+                    sp -= call_argc + 2;
+                    if (opcode == OP_tail_call_method) {
+                        ret_val = JS_UNDEFINED;
+                        goto done;
+                    }
+                    *sp++ = JS_UNDEFINED;
+                    BREAK;
+                }
                 sf->cur_pc = pc;
                 ret_val = JS_CallInternal(ctx, call_argv[-1], call_argv[-2],
                                           JS_UNDEFINED, call_argc,
                                           vc(call_argv), 0);
                 if (unlikely(JS_IsException(ret_val)))
                     goto exception;
+                if (unlikely(mask_result && ctx->run_to_line.fast_forward)) {
+                    JS_FreeValue(ctx, ret_val);
+                    ret_val = JS_UNDEFINED;
+                }
                 if (opcode == OP_tail_call_method)
                     goto done;
                 for(i = -2; i < call_argc; i++)
@@ -18929,13 +19002,28 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
         CASE(OP_apply):
             {
                 int magic;
+                bool mask_result;
                 magic = get_u16(pc);
                 pc += 2;
+                mask_result =
+                    js_run_to_line_should_mask_call_result(ctx, sp[-3]);
+                if (unlikely(js_run_to_line_should_skip_call(ctx, sp[-3]))) {
+                    JS_FreeValue(ctx, sp[-3]);
+                    JS_FreeValue(ctx, sp[-2]);
+                    JS_FreeValue(ctx, sp[-1]);
+                    sp -= 3;
+                    *sp++ = JS_UNDEFINED;
+                    BREAK;
+                }
                 sf->cur_pc = pc;
 
                 ret_val = js_function_apply(ctx, sp[-3], 2, vc(&sp[-2]), magic);
                 if (unlikely(JS_IsException(ret_val)))
                     goto exception;
+                if (unlikely(mask_result && ctx->run_to_line.fast_forward)) {
+                    JS_FreeValue(ctx, ret_val);
+                    ret_val = JS_UNDEFINED;
+                }
                 JS_FreeValue(ctx, sp[-3]);
                 JS_FreeValue(ctx, sp[-2]);
                 JS_FreeValue(ctx, sp[-1]);
@@ -19044,10 +19132,20 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
             {
                 JSValue obj;
                 int scope_idx;
+                bool mask_result;
                 call_argc = get_u16(pc);
                 scope_idx = get_u16(pc + 2) - 1;
                 pc += 4;
                 call_argv = sp - call_argc;
+                mask_result =
+                    js_run_to_line_should_mask_call_result(ctx, call_argv[-1]);
+                if (unlikely(js_run_to_line_should_skip_call(ctx, call_argv[-1]))) {
+                    for(i = -1; i < call_argc; i++)
+                        JS_FreeValue(ctx, call_argv[i]);
+                    sp -= call_argc + 1;
+                    *sp++ = JS_UNDEFINED;
+                    BREAK;
+                }
                 sf->cur_pc = pc;
                 if (js_same_value(ctx, call_argv[-1], ctx->eval_obj)) {
                     if (call_argc >= 1)
@@ -19063,6 +19161,10 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                 }
                 if (unlikely(JS_IsException(ret_val)))
                     goto exception;
+                if (unlikely(mask_result && ctx->run_to_line.fast_forward)) {
+                    JS_FreeValue(ctx, ret_val);
+                    ret_val = JS_UNDEFINED;
+                }
                 for(i = -1; i < call_argc; i++)
                     JS_FreeValue(ctx, call_argv[i]);
                 sp -= call_argc + 1;
@@ -19076,9 +19178,19 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                 uint32_t len;
                 JSValue *tab;
                 JSValue obj;
+                bool mask_result;
 
                 scope_idx = get_u16(pc) - 1;
                 pc += 2;
+                mask_result =
+                    js_run_to_line_should_mask_call_result(ctx, sp[-2]);
+                if (unlikely(js_run_to_line_should_skip_call(ctx, sp[-2]))) {
+                    JS_FreeValue(ctx, sp[-2]);
+                    JS_FreeValue(ctx, sp[-1]);
+                    sp -= 2;
+                    *sp++ = JS_UNDEFINED;
+                    BREAK;
+                }
                 sf->cur_pc = pc;
                 tab = build_arg_list(ctx, &len, sp[-1]);
                 if (!tab)
@@ -19096,6 +19208,10 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                 free_arg_list(ctx, tab, len);
                 if (unlikely(JS_IsException(ret_val)))
                     goto exception;
+                if (unlikely(mask_result && ctx->run_to_line.fast_forward)) {
+                    JS_FreeValue(ctx, ret_val);
+                    ret_val = JS_UNDEFINED;
+                }
                 JS_FreeValue(ctx, sp[-2]);
                 JS_FreeValue(ctx, sp[-1]);
                 sp -= 2;
@@ -19499,6 +19615,7 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
             {
                 int res;
                 JSValue op1;
+                int next_pc, jump_pc;
 
                 op1 = sp[-1];
                 pc += 4;
@@ -19508,6 +19625,10 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                     res = JS_ToBoolFree(ctx, op1);
                 }
                 sp--;
+                next_pc = pc - b->byte_code_buf;
+                jump_pc = next_pc + (int32_t)get_u32(pc - 4) - 4;
+                res = js_run_to_line_should_jump(ctx, b, next_pc,
+                                                 jump_pc, res);
                 if (res) {
                     pc += (int32_t)get_u32(pc - 4) - 4;
                 }
@@ -19519,6 +19640,7 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
             {
                 int res;
                 JSValue op1;
+                int next_pc, jump_pc;
 
                 op1 = sp[-1];
                 pc += 4;
@@ -19528,6 +19650,10 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                     res = JS_ToBoolFree(ctx, op1);
                 }
                 sp--;
+                next_pc = pc - b->byte_code_buf;
+                jump_pc = next_pc + (int32_t)get_u32(pc - 4) - 4;
+                res = !js_run_to_line_should_jump(ctx, b, next_pc,
+                                                  jump_pc, !res);
                 if (!res) {
                     pc += (int32_t)get_u32(pc - 4) - 4;
                 }
@@ -19539,6 +19665,7 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
             {
                 int res;
                 JSValue op1;
+                int next_pc, jump_pc;
 
                 op1 = sp[-1];
                 pc += 1;
@@ -19548,6 +19675,10 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                     res = JS_ToBoolFree(ctx, op1);
                 }
                 sp--;
+                next_pc = pc - b->byte_code_buf;
+                jump_pc = next_pc + (int8_t)pc[-1] - 1;
+                res = js_run_to_line_should_jump(ctx, b, next_pc,
+                                                 jump_pc, res);
                 if (res) {
                     pc += (int8_t)pc[-1] - 1;
                 }
@@ -19559,6 +19690,7 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
             {
                 int res;
                 JSValue op1;
+                int next_pc, jump_pc;
 
                 op1 = sp[-1];
                 pc += 1;
@@ -19568,6 +19700,10 @@ static JSValue JS_CallInternal(JSContext *caller_ctx, JSValueConst func_obj,
                     res = JS_ToBoolFree(ctx, op1);
                 }
                 sp--;
+                next_pc = pc - b->byte_code_buf;
+                jump_pc = next_pc + (int8_t)pc[-1] - 1;
+                res = !js_run_to_line_should_jump(ctx, b, next_pc,
+                                                  jump_pc, !res);
                 if (!res) {
                     pc += (int8_t)pc[-1] - 1;
                 }
@@ -22767,6 +22903,188 @@ static const JSOpCode opcode_info[OP_COUNT + (OP_TEMP_END - OP_TEMP_START)] = {
 #define short_opcode_info(op)           \
     opcode_info[(op) >= OP_TEMP_START ? \
                 (op) + (OP_TEMP_END - OP_TEMP_START) : (op)]
+
+typedef struct JSRunToLineBest {
+    JSFunctionBytecode *function;
+    int line;
+    int pc;
+    int depth;
+} JSRunToLineBest;
+
+static JSFunctionBytecode *js_run_to_line_get_bytecode(JSValueConst obj)
+{
+    if (JS_VALUE_GET_TAG(obj) == JS_TAG_FUNCTION_BYTECODE)
+        return JS_VALUE_GET_PTR(obj);
+    if (JS_VALUE_GET_TAG(obj) == JS_TAG_MODULE) {
+        JSModuleDef *m = JS_VALUE_GET_PTR(obj);
+        if (JS_VALUE_GET_TAG(m->func_obj) == JS_TAG_FUNCTION_BYTECODE)
+            return JS_VALUE_GET_PTR(m->func_obj);
+    }
+    return NULL;
+}
+
+static void js_run_to_line_consider(JSRunToLineBest *best,
+                                    JSFunctionBytecode *function,
+                                    int requested_line, int line,
+                                    int pc, int depth)
+{
+    if (line < requested_line)
+        return;
+    if (!best->function || line < best->line ||
+        (line == best->line && depth < best->depth)) {
+        best->function = function;
+        best->line = line;
+        best->pc = pc;
+        best->depth = depth;
+    }
+}
+
+static void js_run_to_line_find_best(JSContext *ctx, JSFunctionBytecode *b,
+                                     int depth, int requested_line,
+                                     JSRunToLineBest *best)
+{
+    int pc, i;
+
+    for (pc = 0; pc < b->byte_code_len;) {
+        uint8_t op = b->byte_code_buf[pc];
+        if (op == OP_debug) {
+            int col_num = 0;
+            int line_num = find_line_num(ctx, b, pc, &col_num);
+            if (line_num > 0) {
+                js_run_to_line_consider(best, b, requested_line,
+                                        line_num, pc, depth);
+            }
+        }
+        pc += short_opcode_info(op).size;
+    }
+
+    for (i = 0; i < b->cpool_count; i++) {
+        if (JS_VALUE_GET_TAG(b->cpool[i]) == JS_TAG_FUNCTION_BYTECODE) {
+            js_run_to_line_find_best(ctx, JS_VALUE_GET_PTR(b->cpool[i]),
+                                     depth + 1, requested_line, best);
+        }
+    }
+}
+
+/* Fast-forward executes only the selected target bytecode function. Native
+   calls and unrelated bytecode functions may perform irreversible work or
+   never return, so their call sites substitute undefined instead. If the
+   target function returns before its OP_debug is reached, mask its result
+   while fast-forward remains active. */
+static bool js_run_to_line_should_mask_call_result(JSContext *ctx,
+                                                   JSValueConst func_obj)
+{
+    return ctx->run_to_line.fast_forward &&
+           JS_GetFunctionBytecode(func_obj) == ctx->run_to_line.target;
+}
+
+static bool js_run_to_line_should_skip_call(JSContext *ctx,
+                                            JSValueConst func_obj)
+{
+    return ctx->run_to_line.fast_forward &&
+           JS_GetFunctionBytecode(func_obj) != ctx->run_to_line.target;
+}
+
+/* Choose the lexical branch containing the target OP_debug. This handles
+   both forward if/else jumps and backward loop jumps without changing the
+   bytecode layout or the behavior of ordinary evaluation. */
+static bool js_run_to_line_should_jump(JSContext *ctx,
+                                       JSFunctionBytecode *b,
+                                       int next_pc, int jump_pc,
+                                       bool normal_jump)
+{
+    int target_pc;
+
+    if (!ctx->run_to_line.fast_forward || b != ctx->run_to_line.target)
+        return normal_jump;
+
+    target_pc = ctx->run_to_line.target_pc;
+    if (jump_pc > next_pc) {
+        if (target_pc >= next_pc && target_pc < jump_pc)
+            return false;
+        if (target_pc >= jump_pc)
+            return true;
+    } else if (jump_pc < next_pc) {
+        if (target_pc >= jump_pc && target_pc < next_pc)
+            return true;
+        if (target_pc >= next_pc)
+            return false;
+    }
+    return normal_jump;
+}
+
+int JS_ResolveRunToLine(JSContext *ctx, JSValueConst obj,
+                        int requested_line,
+                        JSRunToLineResolveResult *out)
+{
+    JSFunctionBytecode *root;
+    JSRunToLineBest best = {0};
+
+    if (out)
+        memset(out, 0, sizeof(*out));
+    if (requested_line <= 0)
+        return 0;
+
+    root = js_run_to_line_get_bytecode(obj);
+    if (!root)
+        return -1;
+    js_run_to_line_find_best(ctx, root, 0, requested_line, &best);
+    if (out && best.function) {
+        out->resolved_line = best.line;
+        out->exact_match = (best.line == requested_line);
+    }
+    return 0;
+}
+
+int JS_EnableRunToLine(JSContext *ctx, JSValueConst obj, int resolved_line)
+{
+    JSFunctionBytecode *root;
+    JSRunToLineBest best = {0};
+
+    if (resolved_line <= 0)
+        return -1;
+    root = js_run_to_line_get_bytecode(obj);
+    if (!root)
+        return -1;
+
+    js_run_to_line_find_best(ctx, root, 0, resolved_line, &best);
+    if (!best.function || best.line != resolved_line)
+        return -1;
+
+    ctx->run_to_line.target = best.function;
+    ctx->run_to_line.target_pc = best.pc;
+    ctx->run_to_line.resolved_line = resolved_line;
+    ctx->run_to_line.fast_forward = true;
+    return 0;
+}
+
+bool JS_RunToLineReached(JSContext *ctx, int line)
+{
+    JSStackFrame *sf;
+    JSObject *p;
+
+    if (!ctx->run_to_line.fast_forward ||
+        line != ctx->run_to_line.resolved_line) {
+        return false;
+    }
+
+    sf = ctx->rt->current_stack_frame;
+    if (!sf || JS_VALUE_GET_TAG(sf->cur_func) != JS_TAG_OBJECT)
+        return false;
+    p = JS_VALUE_GET_OBJ(sf->cur_func);
+    if (!js_class_has_bytecode(p->class_id) ||
+        p->u.func.function_bytecode != ctx->run_to_line.target) {
+        return false;
+    }
+
+    ctx->run_to_line.fast_forward = false;
+    return true;
+}
+
+void JS_ClearRunToLine(JSContext *ctx)
+{
+    memset(&ctx->run_to_line, 0, sizeof(ctx->run_to_line));
+}
 
 static void json_free_token(JSParseState *s, JSToken *token) {
     // Only free actual allocated values
@@ -35114,6 +35432,11 @@ typedef struct CodeContext {
     int label;
     int val;
     JSAtom atom;
+    /* OP_debug normally behaves like source-location metadata and is skipped
+       while matching optimizer patterns. Run-to-line compilation treats it
+       as a statement boundary so an optimization cannot consume the only
+       executable marker for a later source line. */
+    bool stop_at_debug;
 } CodeContext;
 
 #define M2(op1, op2)            ((uint32_t)(op1) | ((uint32_t)(op2) << 8))
@@ -35153,6 +35476,8 @@ static bool code_match(CodeContext *s, int pos, ...)
                 col_num = get_u32(tab + pos + 5);
                 pos = pos_next;
             } else if (op == OP_debug || op == OP_debugger_stmt) {
+                if (s->stop_at_debug)
+                    goto done;
                 pos = pos_next;
             } else {
                 break;
@@ -35473,6 +35798,7 @@ static __exception int resolve_variables(JSContext *ctx, JSFunctionDef *s)
 
     cc.bc_buf = bc_buf = s->byte_code.buf;
     cc.bc_len = bc_len = s->byte_code.size;
+    cc.stop_at_debug = ctx->run_to_line.compile_mode;
     js_dbuf_init(ctx, &bc_out);
 
     /* first pass for runtime checks (must be done before the
@@ -36111,6 +36437,7 @@ static __exception int resolve_labels(JSContext *ctx, JSFunctionDef *s)
 
     cc.bc_buf = bc_buf = s->byte_code.buf;
     cc.bc_len = bc_len = s->byte_code.size;
+    cc.stop_at_debug = ctx->run_to_line.compile_mode;
     js_dbuf_init(ctx, &bc_out);
 
     if (s->jump_size) {
@@ -36468,6 +36795,12 @@ static __exception int resolve_labels(JSContext *ctx, JSFunctionDef *s)
         case OP_push_false:
         case OP_push_true:
             val = (op == OP_push_true);
+            /* Keep the condition and both successors available while compiling
+               for run-to-line; the interpreter selects the target branch. */
+            if (ctx->run_to_line.compile_mode &&
+                code_match(&cc, pos_next, M2(OP_if_false, OP_if_true), -1)) {
+                goto no_change;
+            }
             if (code_match(&cc, pos_next, M2(OP_if_false, OP_if_true), -1)) {
             has_constant_test:
                 if (cc.line_num >= 0) line_num = cc.line_num;
@@ -36516,6 +36849,12 @@ static __exception int resolve_labels(JSContext *ctx, JSFunctionDef *s)
                 break;
             }
             /* Optimize constant tests: `if (0)`, `if (1)`, `if (!0)`... */
+            if (ctx->run_to_line.compile_mode &&
+                code_match(&cc, pos_next, M2(OP_if_false, OP_if_true), -1)) {
+                add_pc2line_info(s, bc_out.size, line_num, col_num);
+                push_short_int(&bc_out, val);
+                break;
+            }
             if (code_match(&cc, pos_next, M2(OP_if_false, OP_if_true), -1)) {
                 val = (val != 0);
                 goto has_constant_test;
@@ -36619,6 +36958,12 @@ static __exception int resolve_labels(JSContext *ctx, JSFunctionDef *s)
                 break;
             }
             /* transform undefined if_true(l1)/if_false(l1) -> nop/goto(l1) */
+            if (ctx->run_to_line.compile_mode &&
+                code_match(&cc, pos_next, M2(OP_if_false, OP_if_true), -1)) {
+                add_pc2line_info(s, bc_out.size, line_num, col_num);
+                dbuf_putc(&bc_out, OP_undefined);
+                break;
+            }
             if (code_match(&cc, pos_next, M2(OP_if_false, OP_if_true), -1)) {
                 val = 0;
                 goto has_constant_test;
@@ -38709,6 +39054,21 @@ JSValue JS_Eval(JSContext *ctx, const char *input, size_t input_len,
 JSValue JS_Eval2(JSContext *ctx, const char *input, size_t input_len, JSEvalOptions *options)
 {
     return JS_EvalThis2(ctx, ctx->global_obj, input, input_len, options);
+}
+
+JSValue JS_Eval2RunToLineCompile(JSContext *ctx,
+                                 const char *input, size_t input_len,
+                                 JSEvalOptions *options)
+{
+    JSValue ret;
+    bool saved_compile_mode = ctx->run_to_line.compile_mode;
+
+    /* The flag is scoped to this compilation. Runtime fast-forward is enabled
+       only after the resulting bytecode and target OP_debug are validated. */
+    ctx->run_to_line.compile_mode = true;
+    ret = JS_EvalThis2(ctx, ctx->global_obj, input, input_len, options);
+    ctx->run_to_line.compile_mode = saved_compile_mode;
+    return ret;
 }
 
 int JS_ResolveModule(JSContext *ctx, JSValueConst obj)
