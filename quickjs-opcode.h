@@ -298,6 +298,9 @@ def( dispose_scope, 3, 0, 0, u16) /* emitted in phase 1, removed in phase 2 */
 
 def(     source_loc, 9, 0, 0, u32x2) /* emitted in phase 1, removed in phase 3 */
 
+/* Resolve loop labels in phase 3; a -1 body label marks a whole-loop entry. */
+def(seek_loop_compile, 9, 0, 0, u32x2)
+
 DEF(    push_minus1, 1, 0, 1, none_int)
 DEF(         push_0, 1, 0, 1, none_int)
 DEF(         push_1, 1, 0, 1, none_int)
@@ -374,6 +377,9 @@ DEF( typeof_is_function, 1, 1, 1, none)
 
 DEF(  debug, 1, 0, 0, none)
 DEF(  debugger_stmt, 1, 0, 0, none)
+
+/* Run-to-line only: zero body offset skips unrelated loops before setup. */
+DEF(  seek_loop, 9, 0, 0, u32x2)
 
 #undef DEF
 #undef def
